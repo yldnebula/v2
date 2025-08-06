@@ -21,7 +21,7 @@ public record DialogueState(
     Map<String, Object> collectedSlots,
     Status status,
     OriginatingIntent originatingIntent,
-    List<ChatMessage> chatHistory // 新增字段：对话历史
+    List<ChatMessage> chatHistory // 记录组件名为 chatHistory
 ) {
     public enum Status {
         GATHERING_INFO,      // 正在收集中
@@ -32,19 +32,26 @@ public record DialogueState(
 
     public record OriginatingIntent(String intentName, Map<String, Object> arguments) {}
 
-    // 提供一个包含父任务和历史的构造器
-    public DialogueState(String conversationId, String intentName, Set<String> requiredSlots, Map<String, Object> collectedSlots, Status status, OriginatingIntent originatingIntent, List<ChatMessage> history) {
+    /**
+     * 这是一个对记录的规范构造器的显式声明。
+     * **修正点**: 将参数名 history 改为 chatHistory，以匹配记录组件的名称，这是Java record规范的要求。
+     * 我们在这里显式声明它，是为了确保传入的chatHistory列表是可变的，通过创建一个ArrayList副本。
+     */
+    public DialogueState(String conversationId, String intentName, Set<String> requiredSlots, Map<String, Object> collectedSlots, Status status, OriginatingIntent originatingIntent, List<ChatMessage> chatHistory) {
         this.conversationId = conversationId;
         this.intentName = intentName;
         this.requiredSlots = requiredSlots;
         this.collectedSlots = collectedSlots;
         this.status = status;
         this.originatingIntent = originatingIntent;
-        this.chatHistory = new java.util.ArrayList<>(history); // 创建一个可变副本
+        this.chatHistory = new java.util.ArrayList<>(chatHistory); // 创建一个可变副本
     }
 
-    // 提供一个不带父任务但带历史的构造器
-    public DialogueState(String conversationId, String intentName, Set<String> requiredSlots, Map<String, Object> collectedSlots, Status status, List<ChatMessage> history) {
-        this(conversationId, intentName, requiredSlots, collectedSlots, status, null, history);
+    /**
+     * 提供一个不带父任务但带历史的便捷构造器。
+     * **修正点**: 将参数名 history 改为 chatHistory，以正确地委托给上面的规范构造器。
+     */
+    public DialogueState(String conversationId, String intentName, Set<String> requiredSlots, Map<String, Object> collectedSlots, Status status, List<ChatMessage> chatHistory) {
+        this(conversationId, intentName, requiredSlots, collectedSlots, status, null, chatHistory);
     }
 }
