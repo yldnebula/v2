@@ -6,6 +6,7 @@ import com.example.v2.chat.Prompt;
 import com.example.v2.metadata.ToolMetadataService;
 import com.example.v2.state.DialogueState;
 import com.example.v2.state.DialogueStateService;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -17,7 +18,7 @@ import java.util.*;
 import java.util.stream.Collectors;
 
 /**
- * 对话流服务 (LLM专家) - 具备多轮槽位填充能力
+ * 对话流服务 (LLM专家) - 具备多轮槽位填充及偏离处理能力
  */
 @Service
 public class DialogueFlowService {
@@ -26,65 +27,62 @@ public class DialogueFlowService {
     @Autowired private ApplicationContext context;
     @Autowired private DialogueStateService stateService;
     @Autowired private ToolMetadataService metadataService;
+    @Autowired private WorkflowDispatcherService workflowDispatcher; // 注入工作流调度器
     private final ObjectMapper mapper = new ObjectMapper();
 
+    // 对话返回结果，包含回复和任务是否结束的标志
     public record DialogueResponse(String reply, boolean isTaskFinished) {}
 
     /**
      * 统一的对话处理入口。
      */
     public DialogueResponse processMessage(String userMessage, String conversationId) {
-        // 1. 检查是否存在正在进行的对话
         Optional<DialogueState> currentStateOpt = stateService.getState(conversationId);
-
-        if (currentStateOpt.isPresent()) {
-            // 2. 如果有，则继续处理这个进行中的任务
-            return continueOngoingTask(userMessage, currentStateOpt.get());
-        } else {
-            // 3. 如果没有，则尝试开启一个新任务
-            return startNewTask(userMessage, conversationId);
-        }
+        return currentStateOpt.map(state -> continueOngoingTask(userMessage, state))
+                              .orElseGet(() -> startNewTask(userMessage, conversationId));
     }
 
     private DialogueResponse startNewTask(String userMessage, String conversationId) {
         System.out.println("--- [对话流] 尝试开启新任务... ---");
-        Set<String> allTools = metadataService.getToolSlots().keySet();
-        var intentResult = extractIntentAndSlots(userMessage, allTools);
+        Set<String> allBusinessTools = metadataService.getToolSlots().keySet();
+        var intentResult = extractIntentAndSlots(userMessage, allBusinessTools);
 
         if ("no_intent".equals(intentResult.intentName())) {
-            return new DialogueResponse("抱歉，我不太理解您的意思，请说得更具体一些。", true);
+            return handleDigression(userMessage, null); // 作为闲聊处理
         }
 
-        // 创建一个新的对话状态
-        DialogueState newState = new DialogueState(
-            conversationId,
-            intentResult.intentName(),
-            metadataService.getRequiredSlots(intentResult.intentName()),
-            new HashMap<>(intentResult.extractedSlots()),
-            DialogueState.Status.GATHERING_INFO
-        );
-
+        DialogueState newState = new DialogueState(conversationId, intentResult.intentName(), metadataService.getRequiredSlots(intentResult.intentName()), new HashMap<>(intentResult.extractedSlots()), DialogueState.Status.GATHERING_INFO);
         stateService.saveState(conversationId, newState);
-        return continueOngoingTask(userMessage, newState);
+        return proceedState(userMessage, newState);
     }
 
     private DialogueResponse continueOngoingTask(String userMessage, DialogueState state) {
-        // 如果是确认阶段，用户的回复有特殊含义
+        System.out.println("--- [对话流] 继续进行中任务: " + state.intentName() + " ---");
+        // 1. 优先检查是否为偏离意图 (例如查天气)
+        Set<String> digressionTools = Set.of("check_weather"); // 可配置的偏离工具集
+        var digressionIntent = extractIntentAndSlots(userMessage, digressionTools);
+        if (!"no_intent".equals(digressionIntent.intentName())) {
+            return handleDigression(userMessage, state);
+        }
+
+        // 2. 如果不是偏离，则处理主线任务
         if (state.status() == DialogueState.Status.CONFIRMATION_PENDING) {
             return handleConfirmation(userMessage, state);
         }
 
-        // 否则，继续收集信息
-        var intentResult = extractIntentAndSlots(userMessage, Set.of(state.intentName()));
-        state.collectedSlots().putAll(intentResult.extractedSlots());
+        // 3. 否则，继续收集槽位信息
+        var mainIntentResult = extractIntentAndSlots(userMessage, Set.of(state.intentName()));
+        state.collectedSlots().putAll(mainIntentResult.extractedSlots());
+        return proceedState(userMessage, state);
+    }
 
-        // 检查是否所有槽位都已收集完毕
+    private DialogueResponse proceedState(String userMessage, DialogueState state) {
         Optional<String> nextSlot = findNextMissingSlot(state);
         if (nextSlot.isEmpty()) {
             // 所有槽位已满，进入确认阶段
-            state = new DialogueState(state.conversationId(), state.intentName(), state.requiredSlots(), state.collectedSlots(), DialogueState.Status.CONFIRMATION_PENDING);
-            stateService.saveState(state.conversationId(), state);
-            return new DialogueResponse(buildConfirmationMessage(state), false);
+            DialogueState newState = new DialogueState(state.conversationId(), state.intentName(), state.requiredSlots(), state.collectedSlots(), DialogueState.Status.CONFIRMATION_PENDING);
+            stateService.saveState(state.conversationId(), newState);
+            return new DialogueResponse(buildConfirmationMessage(newState), false);
         } else {
             // 提问下一个需要填充的槽位
             stateService.saveState(state.conversationId(), state);
@@ -93,42 +91,62 @@ public class DialogueFlowService {
     }
 
     private DialogueResponse handleConfirmation(String userMessage, DialogueState state) {
-        // 在确认阶段，启用特殊的modify_slot工具
         var intentResult = extractIntentAndSlots(userMessage, Set.of("modify_slot"));
 
         if ("modify_slot".equals(intentResult.intentName())) {
-            // 用户想要修改信息
             Map<String, Object> args = intentResult.extractedSlots();
             state.collectedSlots().put((String)args.get("slot_name"), args.get("slot_value"));
-            // 状态回退，重新确认
             DialogueState newState = new DialogueState(state.conversationId(), state.intentName(), state.requiredSlots(), state.collectedSlots(), DialogueState.Status.CONFIRMATION_PENDING);
             stateService.saveState(state.conversationId(), newState);
             return new DialogueResponse(buildConfirmationMessage(newState), false);
         }
 
-        // 假设用户的其他肯定性回答意味着确认
         if (userMessage.contains("对") || userMessage.contains("是的") || userMessage.contains("没错")) {
-            stateService.clearState(state.conversationId()); // 清理状态
-            return new DialogueResponse("好的，正在为您办理...", true); // 这里应该触实际的工作流调用
+            // 确认成功，执行工作流
+            Map<String, Object> workflowResult = workflowDispatcher.dispatch(state.intentName(), state.collectedSlots());
+            stateService.clearState(state.conversationId());
+            String summary = summarizeResult(userMessage, workflowResult);
+            return new DialogueResponse(summary, true);
         } else {
-            // 用户否定但未提供修改信息，引导用户
             return new DialogueResponse("好的，请问是哪一项信息有误呢？您可以直接告诉我，例如‘职业是产品经理’。", false);
         }
     }
 
+    private DialogueResponse handleDigression(String userMessage, DialogueState currentState) {
+        System.out.println("--- [对话流] 检测到偏离任务... ---");
+        Set<String> digressionTools = Set.of("check_weather");
+        var intentResult = extractIntentAndSlots(userMessage, digressionTools);
+
+        Map<String, Object> workflowResult = workflowDispatcher.dispatch(intentResult.intentName(), intentResult.extractedSlots());
+        String digressionReply = summarizeResult(userMessage, workflowResult);
+
+        // 如果当前有主线任务，则在回复偏离任务后，追加主线任务的提问
+        if (currentState != null) {
+            Optional<String> nextSlot = findNextMissingSlot(currentState);
+            String mainTaskQuestion = nextSlot.map(metadataService::getQuestionForSlot)
+                                              .orElse(buildConfirmationMessage(currentState)); // 如果槽位已满，则重新确认
+            return new DialogueResponse(digressionReply + "\n\n那么，回到我们正在办理的业务，" + mainTaskQuestion, false);
+        }
+
+        return new DialogueResponse(digressionReply, true);
+    }
+
+    private String summarizeResult(String userMessage, Map<String, Object> workflowResult) {
+        try {
+            String resultJson = mapper.writeValueAsString(workflowResult);
+            String systemPrompt = String.format("你是一个专业的助手。用户的请求是: '%s'。后端执行结果是: %s。请用自然、友好的中文总结这个结果。", userMessage, resultJson);
+            var prompt = new Prompt(List.of(Map.of("role", "system", "content", systemPrompt)), new ChatOptions(null));
+            return chatClient.call(prompt).result().content();
+        } catch (JsonProcessingException e) { return "处理结果时出现错误。"; }
+    }
+
     private Optional<String> findNextMissingSlot(DialogueState state) {
-        return state.requiredSlots().stream()
-            .filter(slot -> !state.collectedSlots().containsKey(slot))
-            .findFirst();
+        return state.requiredSlots().stream().filter(slot -> !state.collectedSlots().containsKey(slot)).findFirst();
     }
 
     private String buildConfirmationMessage(DialogueState state) {
-        StringBuilder sb = new StringBuilder("好的，请您确认信息：\n");
-        state.collectedSlots().forEach((key, value) -> 
-            sb.append(String.format("- %s: %s\n", key, value))
-        );
-        sb.append("信息正确吗？");
-        return sb.toString();
+        String collectedInfo = state.collectedSlots().entrySet().stream().map(e -> String.format("- %s: %s", e.getKey(), e.getValue())).collect(Collectors.joining("\n"));
+        return String.format("好的，请您确认信息：\n%s\n信息正确吗？", collectedInfo);
     }
 
     private record IntentExtractionResult(String intentName, Map<String, Object> extractedSlots) {}
@@ -143,9 +161,7 @@ public class DialogueFlowService {
             try {
                 Map<String, Object> slots = mapper.readValue(toolCall.function().arguments(), new TypeReference<>() {});
                 return new IntentExtractionResult(toolCall.function().name(), slots);
-            } catch (Exception e) {
-                return new IntentExtractionResult("no_intent", Collections.emptyMap());
-            }
+            } catch (Exception e) { return new IntentExtractionResult("no_intent", Collections.emptyMap()); }
         }
         return new IntentExtractionResult("no_intent", Collections.emptyMap());
     }

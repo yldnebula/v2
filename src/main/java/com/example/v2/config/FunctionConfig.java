@@ -30,6 +30,12 @@ public class FunctionConfig {
     }
 
     @Bean
+    @Description("查询指定城市的天气情况。如果用户没有指定城市，可以默认为杭州。")
+    public Function<String, com.example.v2.tool.WeatherToolService.Response> check_weather() {
+        return null; // Placeholder for metadata
+    }
+
+    @Bean
     @Description("当用户在最后确认信息阶段，明确指出某一项信息错误并提供新值时使用此功能。")
     public Function<ModifySlotRequest, String> modify_slot() {
         // This is a special function that doesn't have a real tool implementation.
