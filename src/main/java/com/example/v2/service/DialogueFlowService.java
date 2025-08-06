@@ -1,5 +1,6 @@
 package com.example.v2.service;
 
+import com.example.v2.chat.AssistantMessage;
 import com.example.v2.chat.ChatClient;
 import com.example.v2.chat.ChatOptions;
 import com.example.v2.chat.Prompt;
@@ -11,16 +12,18 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
-import java.lang.reflect.Field;
 import java.util.*;
 import java.util.stream.Collectors;
 
+/**
+ * 对话流服务 (LLM专家) - 最终修正版
+ */
 @Service
 public class DialogueFlowService {
 
     @Autowired private ChatClient chatClient;
     @Autowired private DialogueStateService stateService;
-    @Autowired private ToolMetadataService metadataService;
+    @Autowired private ToolMetadataService metadataService; // 注入元数据服务作为唯一真实来源
     @Autowired private WorkflowDispatcherService workflowDispatcher;
     private final ObjectMapper mapper = new ObjectMapper();
 
@@ -34,7 +37,9 @@ public class DialogueFlowService {
 
     private DialogueResponse startNewTask(String userMessage, String conversationId) {
         System.out.println("--- [对话流] 尝试开启新任务... ---");
-        var intentResult = extractIntentAndSlots(userMessage, metadataService.getBusinessToolNames(), conversationId);
+        // **修正点**: 从ToolMetadataService获取所有业务工具的名称
+        Set<String> allBusinessTools = metadataService.getBusinessToolNames();
+        var intentResult = extractIntentAndSlots(userMessage, allBusinessTools, conversationId);
 
         if ("no_intent".equals(intentResult.intentName())) {
             return handleDigression(userMessage, null);
@@ -53,7 +58,8 @@ public class DialogueFlowService {
 
     private DialogueResponse continueOngoingTask(String userMessage, DialogueState state) {
         System.out.println("--- [对话流] 继续进行中任务: " + state.intentName() + " ---");
-        var digressionIntent = extractIntentAndSlots(userMessage, Set.of("check_weather"), state.conversationId());
+        Set<String> digressionTools = Set.of("check_weather");
+        var digressionIntent = extractIntentAndSlots(userMessage, digressionTools, state.conversationId());
         if (!"no_intent".equals(digressionIntent.intentName())) {
             return handleDigression(userMessage, state);
         }
@@ -74,7 +80,7 @@ public class DialogueFlowService {
             stateService.saveState(state.conversationId(), newState);
             return new DialogueResponse(buildConfirmationMessage(newState), false);
         } else {
-            stateService.saveState(state.conversationId(), state);
+            stateService.saveState(state.conversationId(), newState);
             return new DialogueResponse(metadataService.getQuestionForSlot(nextSlot.get()), false);
         }
     }
