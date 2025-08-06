@@ -5,46 +5,56 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Service;
 
+import java.util.Map;
 import java.util.function.Function;
 
 /**
  * 股票购买工具服务。
- * @Service("stock_purchase") 定义了这个Bean的名称，必须与FunctionConfig中以及LLM期望的函数名一致。
  */
 @Service("stock_purchase")
 public class StockPurchaseService implements Function<String, StockPurchaseService.Response> {
 
     private final ObjectMapper mapper = new ObjectMapper();
 
-    // 定义工具的输入参数结构
-    public record Request(
-        @JsonProperty(required = true) String ticker, // 股票代码
-        @JsonProperty(required = true) int quantity  // 购买数量
-    ) {}
+    public record Request(String ticker, int quantity, String userId) {}
+    public record Response(String status, String message, String missingDependency) {
+        // 为成功和失败场景提供便捷的构造器
+        public static Response success(String message) {
+            return new Response("SUCCESS", message, null);
+        }
+        public static Response preconditionFailed(String message, String missingDependency) {
+            return new Response("PRECONDITION_FAILED", message, missingDependency);
+        }
+    }
 
-    // 定义工具的输出结果结构
-    public record Response(String status, String message) {}
-
-    /**
-     * 工具的执行入口。
-     * @param argumentsJson LLM传来的、包含所有参数的JSON字符串。
-     * @return 执行结果。
-     */
     @Override
     public Response apply(String argumentsJson) {
         try {
-            // 1. 将JSON字符串参数反序列化为Java对象
             Request request = mapper.readValue(argumentsJson, Request.class);
 
-            // 2. 执行具体的业务逻辑（此处为模拟）
-            System.out.println("--- [工具执行] ---");
-            System.out.println("正在执行股票购买操作，参数为: " + request);
-            System.out.println("----------------------");
+            // --- 步骤 1: 前置条件检查 ---
+            System.out.println("--- [工具执行] 正在检查用户 " + request.userId() + " 的前置条件... ---");
+            if (!hasShareholderAccount(request.userId())) {
+                System.out.println("--- [工具执行] 前置条件检查失败：缺少股东账户。 ---");
+                return Response.preconditionFailed("用户缺少股东账户", "open_account");
+            }
+            System.out.println("--- [工具执行] 前置条件检查通过。 ---");
 
-            // 3. 返回结构化的执行结果
-            return new Response("success", "成功购买 " + request.quantity() + " 股 " + request.ticker());
+            // --- 步骤 2: 执行核心业务逻辑 ---
+            System.out.println("--- [工具执行] 正在执行股票购买操作，参数为: " + request + " ---");
+            return Response.success("成功购买 " + request.quantity() + " 股 " + request.ticker());
+
         } catch (JsonProcessingException e) {
             throw new RuntimeException("解析股票购买参数时出错", e);
         }
+    }
+
+    /**
+     * 模拟一个检查用户是否拥有股东账户的服务。
+     * 在真实应用中，这会查询数据库或调用另一个微服务。
+     * 为了演示，我们假设除了“user_with_account”之外的所有用户都没有账户。
+     */
+    private boolean hasShareholderAccount(String userId) {
+        return "user_with_account".equals(userId);
     }
 }
