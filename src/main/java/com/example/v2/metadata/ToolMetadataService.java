@@ -1,25 +1,59 @@
 package com.example.v2.metadata;
 
+import com.example.v2.tool.OpenAccountService;
+import com.example.v2.tool.StockPurchaseService;
+import com.example.v2.tool.WeatherToolService;
 import org.springframework.stereotype.Service;
 
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
- * 工具元数据服务 (工具的说明书)。
- * 集中管理所有工具的元信息，例如需要哪些参数（槽位）以及如何提问。
- * 在生产环境中，这些信息可以从配置文件、数据库或服务发现中心加载。
+ * 工具元数据服务 (工具的“唯一真实来源”)。
+ * 集中管理所有工具的元信息，包括其描述、所需槽位和提问话术。
  */
 @Service
 public class ToolMetadataService {
 
-    // 定义每个业务工具及其所需的槽位
-    private static final Map<String, Set<String>> BUSINESS_TOOL_SLOTS = Map.of(
-        "open_account", Set.of("education", "occupation", "address"),
-        "stock_purchase", Set.of("ticker", "quantity")
+    /**
+     * 内部数据结构，用于定义一个完整的工具元数据。
+     */
+    private record ToolMetadata(
+        String toolName,
+        String description,
+        Set<String> requiredSlots,
+        Class<?> requestClass // 用于后续通过反射构建参数
+    ) {}
+
+    private static final List<ToolMetadata> TOOL_METADATA_LIST = List.of(
+        new ToolMetadata(
+            "open_account",
+            "为用户开立一个新的账户。需要提供学历、职业和住址信息。",
+            Set.of("education", "occupation", "address"),
+            OpenAccountService.Request.class
+        ),
+        new ToolMetadata(
+            "stock_purchase",
+            "为用户购买指定数量的股票。需要提供股票代码和购买数量。",
+            Set.of("ticker", "quantity"),
+            StockPurchaseService.Request.class
+        ),
+        new ToolMetadata(
+            "check_weather",
+            "查询指定城市的天气情况。如果用户没有指定城市，可以默认为杭州。",
+            Set.of(), // 天气查询没有必需的槽位
+            WeatherToolService.Request.class
+        ),
+        new ToolMetadata(
+            "modify_slot",
+            "当用户在最后确认信息阶段，明确指出某一项信息错误并提供新值时使用此功能。",
+            Set.of("slot_name", "slot_value"),
+            Map.class // 使用一个通用的Map
+        )
     );
 
-    // 定义每个槽位的提问话术
     private static final Map<String, String> SLOT_QUESTIONS = Map.of(
         "education", "请问您的学历是？",
         "occupation", "您的职业是什么呢？",
@@ -28,29 +62,26 @@ public class ToolMetadataService {
         "quantity", "您计划购买多少股？"
     );
 
-    /**
-     * 获取指定意图（工具）所需要的所有槽位名称。
-     * @param intentName 意图名称。
-     * @return 一个包含所有必需槽位名称的集合。
-     */
     public Set<String> getRequiredSlots(String intentName) {
-        return BUSINESS_TOOL_SLOTS.getOrDefault(intentName, Set.of());
+        return TOOL_METADATA_LIST.stream()
+            .filter(t -> t.toolName.equals(intentName))
+            .findFirst()
+            .map(ToolMetadata::requiredSlots)
+            .orElse(Set.of());
     }
 
-    /**
-     * 获取用于询问特定槽位的标准问句。
-     * @param slotName 槽位名称。
-     * @return 用于提问的字符串。
-     */
     public String getQuestionForSlot(String slotName) {
         return SLOT_QUESTIONS.getOrDefault(slotName, "请提供 " + slotName + " 的信息。");
     }
 
-    /**
-     * 获取所有已定义的业务工具的名称列表。
-     * @return 所有工具名称的集合。
-     */
+    public List<ToolMetadata> getAllTools() {
+        return TOOL_METADATA_LIST;
+    }
+
     public Set<String> getBusinessToolNames() {
-        return BUSINESS_TOOL_SLOTS.keySet();
+        return TOOL_METADATA_LIST.stream()
+            .filter(t -> !t.toolName.equals("check_weather") && !t.toolName.equals("modify_slot"))
+            .map(ToolMetadata::toolName)
+            .collect(Collectors.toSet());
     }
 }
