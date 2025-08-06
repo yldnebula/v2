@@ -1,16 +1,16 @@
 package com.example.v2.chat;
 
 import com.example.v2.metadata.ToolMetadataService;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.springframework.util.CollectionUtils;
-import org.springframework.web.client.RestTemplate;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
+import org.springframework.util.CollectionUtils;
+import org.springframework.web.client.RestTemplate;
 
 import java.lang.reflect.Field;
 import java.util.*;
-import java.util.function.Function;
 import java.util.stream.Collectors;
 
 /**
@@ -44,7 +44,7 @@ public class CustomOpenAiChatClient implements ChatClient {
         Map<String, Object> responseBody = callApi(messages, tools);
         AssistantMessage assistantMessage = parseAssistantMessage(responseBody);
 
-        // 简化版：不处理多轮工具调用，因为上层服务会再次调用
+        // 简化版：这个客户端的职责只是调用API并返回解析后的结果，它不处理多轮工具调用的循环。
         return new ChatResponse(assistantMessage);
     }
 
@@ -97,3 +97,4 @@ public class CustomOpenAiChatClient implements ChatClient {
         return Map.of("type", "function", "function", function);
     }
 }
+

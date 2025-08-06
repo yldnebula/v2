@@ -5,6 +5,7 @@ import com.example.v2.chat.ChatClient;
 import com.example.v2.chat.ChatOptions;
 import com.example.v2.chat.Prompt;
 import com.example.v2.metadata.ToolMetadataService;
+import com.example.v2.state.ChatMessage;
 import com.example.v2.state.DialogueState;
 import com.example.v2.state.DialogueStateService;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -17,7 +18,7 @@ import java.util.stream.Collectors;
 
 /**
  * 对话流服务 (LLM专家) - 最终版
- * 具备多轮槽位填充、对话偏离处理、前置条件检查、回归主线以及纯闲聊处理能力。
+ * 具备联合上下文对话、多轮槽位填充、偏离处理、前置条件检查和回归主线等所有高级功能。
  */
 @Service
 public class DialogueFlowService {
@@ -31,113 +32,116 @@ public class DialogueFlowService {
     public record DialogueResponse(String reply, boolean isTaskFinished) {}
 
     public DialogueResponse processMessage(String userMessage, String conversationId) {
-        Optional<DialogueState> currentStateOpt = stateService.getState(conversationId);
-        return currentStateOpt.map(state -> continueOngoingTask(userMessage, state))
-                              .orElseGet(() -> startNewTask(userMessage, conversationId));
+        // 1. 加载或创建新的对话状态
+        DialogueState state = stateService.getState(conversationId)
+            .orElseGet(() -> new DialogueState(conversationId, null, null, new HashMap<>(), null, new ArrayList<>()));
+
+        // 2. 将当前用户消息追加到历史记录中
+        state.chatHistory().add(new ChatMessage("user", userMessage));
+
+        // 3. 根据是否存在进行中意图，决定是继续任务还是开启新任务
+        DialogueResponse response = (state.intentName() != null)
+            ? continueOngoingTask(state)
+            : startNewTask(state);
+        
+        // 4. 将机器人的回复也追加到历史记录中，并保存最终状态
+        state.chatHistory().add(new ChatMessage("assistant", response.reply()));
+        if (response.isTaskFinished()) {
+            stateService.clearState(conversationId);
+        } else {
+            stateService.saveState(conversationId, state);
+        }
+
+        return response;
     }
 
-    private DialogueResponse startNewTask(String userMessage, String conversationId) {
+    private DialogueResponse startNewTask(DialogueState state) {
         System.out.println("--- [对话流] 尝试开启新任务... ---");
         Set<String> allBusinessTools = metadataService.getBusinessToolNames();
-        var intentResult = extractIntentAndSlots(userMessage, allBusinessTools, conversationId);
+        var intentResult = extractIntentAndSlots(state.chatHistory(), allBusinessTools, state.conversationId());
 
         if ("no_intent".equals(intentResult.intentName())) {
-            // **修正点**: 如果不是业务意图，则尝试作为偏离/闲聊处理
-            return handleDigressionOrSimpleChat(userMessage, null);
+            return handleDigressionOrSimpleChat(state);
         }
 
         Set<String> requiredSlots = metadataService.getRequiredSlots(intentResult.intentName());
-        if (requiredSlots.isEmpty()) {
-            Map<String, Object> workflowResult = workflowDispatcher.dispatch(intentResult.intentName(), intentResult.extractedSlots());
-            return handleWorkflowResult(workflowResult, intentResult.intentName(), intentResult.extractedSlots(), conversationId, null);
-        } else {
-            DialogueState newState = new DialogueState(conversationId, intentResult.intentName(), requiredSlots, new HashMap<>(intentResult.extractedSlots()), DialogueState.Status.GATHERING_INFO, null);
-            stateService.saveState(conversationId, newState);
-            return proceedState(newState);
-        }
+        state = new DialogueState(state.conversationId(), intentResult.intentName(), requiredSlots, new HashMap<>(intentResult.extractedSlots()), DialogueState.Status.GATHERING_INFO, state.chatHistory());
+        
+        return proceedState(state);
     }
 
-    private DialogueResponse continueOngoingTask(String userMessage, DialogueState state) {
+    private DialogueResponse continueOngoingTask(DialogueState state) {
         System.out.println("--- [对话流] 继续进行中任务: " + state.intentName() + " ---");
-        return handleDigressionOrSimpleChat(userMessage, state);
+        return handleDigressionOrSimpleChat(state);
     }
 
-    /**
-     * 统一处理偏离或闲聊。这是对话处理的核心分发器。
-     */
-    private DialogueResponse handleDigressionOrSimpleChat(String userMessage, DialogueState currentState) {
-        // 1. 优先检查是否为已知的“偏离”工具（如查天气）
+    private DialogueResponse handleDigressionOrSimpleChat(DialogueState state) {
         Set<String> digressionTools = Set.of("check_weather");
-        var intentResult = extractIntentAndSlots(userMessage, digressionTools, currentState != null ? currentState.conversationId() : "temp_id");
+        var intentResult = extractIntentAndSlots(state.chatHistory(), digressionTools, state.conversationId());
 
         if (!"no_intent".equals(intentResult.intentName())) {
-            // 2. 如果是偏离工具，则执行并回归主线
             System.out.println("--- [对话流] 检测到偏离任务... ---");
             Map<String, Object> workflowResult = workflowDispatcher.dispatch(intentResult.intentName(), intentResult.extractedSlots());
-            String digressionReply = summarizeResult(userMessage, workflowResult);
+            String digressionReply = summarizeResult(state.chatHistory(), workflowResult);
 
-            if (currentState != null) {
-                String mainTaskQuestion = findNextMissingSlot(currentState).map(metadataService::getQuestionForSlot).orElse(buildConfirmationMessage(currentState));
+            if (state.intentName() != null) {
+                String mainTaskQuestion = findNextMissingSlot(state).map(metadataService::getQuestionForSlot).orElse(buildConfirmationMessage(state));
                 return new DialogueResponse(digressionReply + "\n\n那么，回到我们正在办理的业务，" + mainTaskQuestion, false);
             }
             return new DialogueResponse(digressionReply, true);
         }
 
-        // 3. 如果不是任何已知工具，则作为“纯闲聊”处理
-        if (currentState != null) {
-            // 如果当前有主线任务，闲聊后需要回归主线
-            String chatReply = handleSimpleChat(userMessage);
-            String mainTaskQuestion = findNextMissingSlot(currentState).map(metadataService::getQuestionForSlot).orElse(buildConfirmationMessage(currentState));
-            return new DialogueResponse(chatReply + "\n\n回到正题，" + mainTaskQuestion, false);
-        } else {
-            // 如果当前没有主线任务，就是纯粹的闲聊
-            return new DialogueResponse(handleSimpleChat(userMessage), true);
+        if (state.intentName() == null) {
+            return new DialogueResponse(handleSimpleChat(state.chatHistory()), true);
         }
+
+        if (state.status() == DialogueState.Status.CONFIRMATION_PENDING) {
+            return handleConfirmation(state);
+        }
+
+        var mainIntentResult = extractIntentAndSlots(state.chatHistory(), Set.of(state.intentName()), state.conversationId());
+        state.collectedSlots().putAll(mainIntentResult.extractedSlots());
+        return proceedState(state);
     }
 
-    /**
-     * 处理不带任何工具的、开放式的纯闲聊。
-     */
-    private String handleSimpleChat(String userMessage) {
+    private String handleSimpleChat(List<ChatMessage> history) {
         System.out.println("--- [对话流] 处理纯闲聊... ---");
-        String systemPrompt = "你是一个专业的金融助手，但现在用户只是在闲聊，请用友好、简洁的方式回复。";
-        var options = new ChatOptions(null); // 不启用任何工具
-        var prompt = new Prompt(List.of(new com.example.v2.chat.SystemMessage(systemPrompt), new com.example.v2.chat.UserMessage(userMessage)), options);
+        var options = new ChatOptions(null);
+        var prompt = new Prompt(history.stream().map(m -> (Object)m).collect(Collectors.toList()), options);
         return chatClient.call(prompt).result().content();
     }
 
     private DialogueResponse proceedState(DialogueState state) {
         Optional<String> nextSlot = findNextMissingSlot(state);
         if (nextSlot.isEmpty()) {
-            DialogueState newState = new DialogueState(state.conversationId(), state.intentName(), state.requiredSlots(), state.collectedSlots(), DialogueState.Status.CONFIRMATION_PENDING, state.originatingIntent());
+            DialogueState newState = new DialogueState(state.conversationId(), state.intentName(), state.requiredSlots(), state.collectedSlots(), DialogueState.Status.CONFIRMATION_PENDING, state.originatingIntent(), state.chatHistory());
             stateService.saveState(state.conversationId(), newState);
             return new DialogueResponse(buildConfirmationMessage(newState), false);
         } else {
-            stateService.saveState(state.conversationId(), state);
             return new DialogueResponse(metadataService.getQuestionForSlot(nextSlot.get()), false);
         }
     }
 
-    private DialogueResponse handleConfirmation(String userMessage, DialogueState state) {
-        var intentResult = extractIntentAndSlots(userMessage, Set.of("modify_slot"), state.conversationId());
+    private DialogueResponse handleConfirmation(DialogueState state) {
+        var intentResult = extractIntentAndSlots(state.chatHistory(), Set.of("modify_slot"), state.conversationId());
 
         if ("modify_slot".equals(intentResult.intentName())) {
             Map<String, Object> args = intentResult.extractedSlots();
             state.collectedSlots().put((String)args.get("slot_name"), args.get("slot_value"));
-            DialogueState newState = new DialogueState(state.conversationId(), state.intentName(), state.requiredSlots(), state.collectedSlots(), DialogueState.Status.CONFIRMATION_PENDING, state.originatingIntent());
-            stateService.saveState(state.conversationId(), newState);
+            DialogueState newState = new DialogueState(state.conversationId(), state.intentName(), state.requiredSlots(), state.collectedSlots(), DialogueState.Status.CONFIRMATION_PENDING, state.originatingIntent(), state.chatHistory());
             return new DialogueResponse(buildConfirmationMessage(newState), false);
         }
 
-        if (userMessage.contains("对") || userMessage.contains("是的") || userMessage.contains("没错")) {
+        String lastUserMessage = state.chatHistory().get(state.chatHistory().size() - 1).content();
+        if (lastUserMessage.contains("对") || lastUserMessage.contains("是的") || lastUserMessage.contains("没错")) {
             Map<String, Object> workflowResult = workflowDispatcher.dispatch(state.intentName(), state.collectedSlots());
-            return handleWorkflowResult(workflowResult, state.intentName(), state.collectedSlots(), state.conversationId(), state.originatingIntent());
+            return handleWorkflowResult(workflowResult, state.intentName(), state.collectedSlots(), state, state.originatingIntent());
         } else {
             return new DialogueResponse("好的，请问是哪一项信息有误呢？", false);
         }
     }
 
-    private DialogueResponse handleWorkflowResult(Map<String, Object> result, String originalIntent, Map<String, Object> originalArgs, String conversationId, DialogueState.OriginatingIntent parentIntent) {
+    private DialogueResponse handleWorkflowResult(Map<String, Object> result, String originalIntent, Map<String, Object> originalArgs, DialogueState state, DialogueState.OriginatingIntent parentIntent) {
         String status = (String) result.get("status");
         if ("PRECONDITION_FAILED".equals(status)) {
             Map<String, String> data = (Map<String, String>) result.get("data");
@@ -145,27 +149,27 @@ public class DialogueFlowService {
             System.out.println("--- [对话流] 检测到前置条件失败，需要引导用户解决: " + missingDependency + " ---");
 
             DialogueState.OriginatingIntent originatingIntent = new DialogueState.OriginatingIntent(originalIntent, originalArgs);
-            DialogueState subTaskState = new DialogueState(conversationId, missingDependency, metadataService.getRequiredSlots(missingDependency), new HashMap<>(), DialogueState.Status.GATHERING_INFO, originatingIntent);
-            stateService.saveState(conversationId, subTaskState);
+            DialogueState subTaskState = new DialogueState(state.conversationId(), missingDependency, metadataService.getRequiredSlots(missingDependency), new HashMap<>(), DialogueState.Status.GATHERING_INFO, originatingIntent, state.chatHistory());
             return new DialogueResponse(String.format("好的，收到您的%s请求。但在操作前，需要先为您办理%s。我们开始吧？%s", originalIntent, missingDependency, metadataService.getQuestionForSlot(findNextMissingSlot(subTaskState).get())), false);
         }
 
         if (parentIntent != null) {
             System.out.println("--- [对话流] 子任务完成，回归主线任务: " + parentIntent.intentName() + " ---");
-            stateService.clearState(conversationId);
-            return startNewTask(parentIntent.intentName() + " with args " + parentIntent.arguments(), conversationId);
+            stateService.clearState(state.conversationId());
+            return startNewTask(new DialogueState(state.conversationId(), null, null, null, null, state.chatHistory()));
         } else {
-            stateService.clearState(conversationId);
-            String summary = summarizeResult(originalIntent, result);
+            String summary = summarizeResult(state.chatHistory(), result);
             return new DialogueResponse(summary, true);
         }
     }
 
-    private String summarizeResult(String userMessage, Map<String, Object> workflowResult) {
+    private String summarizeResult(List<ChatMessage> history, Map<String, Object> workflowResult) {
         try {
             String resultJson = mapper.writeValueAsString(workflowResult);
-            String systemPrompt = String.format("你是一个专业的助手。用户的请求是: '%s'。后端执行结果是: %s。请用自然、友好的中文总结这个结果。", userMessage, resultJson);
-            var prompt = new Prompt(List.of(Map.of("role", "system", "content", systemPrompt)), new ChatOptions(null));
+            String systemPrompt = String.format("你是一个专业的助手。后端执行结果是: %s。请用自然、友好的中文总结这个结果。", resultJson);
+            List<Object> messages = new ArrayList<>(history);
+            messages.add(new com.example.v2.chat.SystemMessage(systemPrompt));
+            var prompt = new Prompt(messages, new ChatOptions(null));
             return chatClient.call(prompt).result().content();
         } catch (JsonProcessingException e) { return "处理结果时出现错误。"; }
     }
@@ -181,9 +185,9 @@ public class DialogueFlowService {
 
     private record IntentExtractionResult(String intentName, Map<String, Object> extractedSlots) {}
 
-    private IntentExtractionResult extractIntentAndSlots(String userMessage, Set<String> tools, String userId) {
+    private IntentExtractionResult extractIntentAndSlots(List<ChatMessage> history, Set<String> tools, String userId) {
         var options = new ChatOptions(tools);
-        var prompt = new Prompt(List.of(Map.of("role", "user", "content", userMessage)), options);
+        var prompt = new Prompt(history.stream().map(m -> (Object)m).collect(Collectors.toList()), options);
         var assistantMessage = chatClient.call(prompt).result();
 
         if (assistantMessage.toolCalls() != null && !assistantMessage.toolCalls().isEmpty()) {
