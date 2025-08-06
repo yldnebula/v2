@@ -13,8 +13,8 @@ import java.util.Set;
 @Service
 public class ToolMetadataService {
 
-    // 定义每个工具所需的槽位
-    private static final Map<String, Set<String>> TOOL_SLOTS = Map.of(
+    // 定义每个业务工具及其所需的槽位
+    private static final Map<String, Set<String>> BUSINESS_TOOL_SLOTS = Map.of(
         "open_account", Set.of("education", "occupation", "address"),
         "stock_purchase", Set.of("ticker", "quantity")
     );
@@ -28,11 +28,29 @@ public class ToolMetadataService {
         "quantity", "您计划购买多少股？"
     );
 
+    /**
+     * 获取指定意图（工具）所需要的所有槽位名称。
+     * @param intentName 意图名称。
+     * @return 一个包含所有必需槽位名称的集合。
+     */
     public Set<String> getRequiredSlots(String intentName) {
-        return TOOL_SLOTS.getOrDefault(intentName, Set.of());
+        return BUSINESS_TOOL_SLOTS.getOrDefault(intentName, Set.of());
     }
 
+    /**
+     * 获取用于询问特定槽位的标准问句。
+     * @param slotName 槽位名称。
+     * @return 用于提问的字符串。
+     */
     public String getQuestionForSlot(String slotName) {
         return SLOT_QUESTIONS.getOrDefault(slotName, "请提供 " + slotName + " 的信息。");
+    }
+
+    /**
+     * 获取所有已定义的业务工具的名称列表。
+     * @return 所有工具名称的集合。
+     */
+    public Set<String> getBusinessToolNames() {
+        return BUSINESS_TOOL_SLOTS.keySet();
     }
 }

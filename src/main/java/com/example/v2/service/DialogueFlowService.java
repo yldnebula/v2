@@ -36,7 +36,7 @@ public class DialogueFlowService {
 
     private DialogueResponse startNewTask(String userMessage, String conversationId) {
         System.out.println("--- [对话流] 尝试开启新任务... ---");
-        Set<String> allBusinessTools = metadataService.getToolSlots().keySet();
+        Set<String> allBusinessTools = metadataService.getBusinessToolNames();
         var intentResult = extractIntentAndSlots(userMessage, allBusinessTools, conversationId);
 
         if ("no_intent".equals(intentResult.intentName())) {
