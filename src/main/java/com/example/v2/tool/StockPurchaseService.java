@@ -5,7 +5,6 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Service;
 
-import java.util.Map;
 import java.util.function.Function;
 
 /**
@@ -16,7 +15,14 @@ public class StockPurchaseService implements Function<String, StockPurchaseServi
 
     private final ObjectMapper mapper = new ObjectMapper();
 
-    public record Request(String ticker, int quantity, String userId) {}
+    // 定义工具的输入参数结构
+    public record Request(
+        String ticker,
+        int quantity,
+        String userId // userId由DialogueFlowService自动注入
+    ) {}
+
+    // 定义工具的输出结果结构
     public record Response(String status, String message, String missingDependency) {
         // 为成功和失败场景提供便捷的构造器
         public static Response success(String message) {
@@ -51,7 +57,6 @@ public class StockPurchaseService implements Function<String, StockPurchaseServi
 
     /**
      * 模拟一个检查用户是否拥有股东账户的服务。
-     * 在真实应用中，这会查询数据库或调用另一个微服务。
      * 为了演示，我们假设除了“user_with_account”之外的所有用户都没有账户。
      */
     private boolean hasShareholderAccount(String userId) {

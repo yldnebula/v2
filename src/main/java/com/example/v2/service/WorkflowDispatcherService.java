@@ -30,6 +30,7 @@ public class WorkflowDispatcherService {
         try {
             // 根据意图名称，动态地从Spring容器中获取对应的Bean
             Function<String, ?> toolFunction = (Function<String, ?>) context.getBean(intentName);
+            // 将参数Map转换为JSON字符串，以符合工具的输入要求
             String argumentsJson = mapper.writeValueAsString(arguments);
 
             // 执行工具函数

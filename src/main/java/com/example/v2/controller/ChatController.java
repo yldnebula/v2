@@ -11,11 +11,14 @@ import java.util.Map;
 
 /**
  * 前端请求的数据传输对象 (DTO)。
+ * @param message 用户的原始消息。
+ * @param conversationId 唯一标识一次完整对话的ID。
  */
 record ChatRequest(String message, String conversationId) {}
 
 /**
  * 聊天接口的总控制器 (总指挥)。
+ * 它的职责非常单一：接收请求，调用核心服务，然后返回结果。
  */
 @RestController
 public class ChatController {

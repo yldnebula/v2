@@ -9,7 +9,7 @@ import java.util.function.Function;
 
 /**
  * 开户工具服务。
- * @Service("open_account") 定义了这个Bean的名称，必须与FunctionConfig中以及LLM期望的函数名一致。
+ * @Service("open_account") 定义了这个Bean的名称，必须与元数据中的toolName一致。
  * 实现了Function<String, Response>接口，使其可以被工作流调度器统一调用。
  */
 @Service("open_account")
@@ -21,7 +21,8 @@ public class OpenAccountService implements Function<String, OpenAccountService.R
     public record Request(
         @JsonProperty(required = true) String education,
         @JsonProperty(required = true) String occupation,
-        @JsonProperty(required = true) String address
+        @JsonProperty(required = true) String address,
+        String userId // userId由DialogueFlowService自动注入
     ) {}
 
     // 定义工具的输出结果结构
@@ -44,7 +45,7 @@ public class OpenAccountService implements Function<String, OpenAccountService.R
             System.out.println("----------------------");
 
             // 3. 返回结构化的执行结果
-            return new Response("success", "为职业为" + request.occupation() + "的用户开户成功。");
+            return new Response("SUCCESS", "为用户 " + request.userId() + " 开户成功。");
         } catch (JsonProcessingException e) {
             // 在真实的业务中，这里应该有更完善的异常处理
             throw new RuntimeException("解析开户参数时出错", e);
